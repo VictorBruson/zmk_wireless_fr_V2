@@ -15,12 +15,12 @@
 
 #define BASE  0
 #define NAV   1
-#define MOUSE 2
-#define MEDIA 3
-#define NUM   4
-#define SYM   5
-#define FUN   6
-#define GAMING 7
+// #define MOUSE 2
+#define MEDIA 2
+#define NUM   3
+#define SYM   4
+#define FUN   5
+#define GAMING 6
 
 / {
     behaviors {
@@ -57,8 +57,8 @@
             bindings = <
 &trans  &kp Q        &kp W       &kp F          &kp P          &kp B            &kp J        &kp L         &kp U        &kp Y         &kp SQT         &trans
 &trans  &mt LGUI A   &mt LALT R  &mt LCTRL S    &mt LSHFT T    &kp G            &kp M        &mt LSHFT N   &mt LCTRL E  &mt LALT I    &mt LGUI O      &trans
-&trans  &lt MOUSE Z  &mt RALT X  &kp C          &kp D          &kp V            &kp K        &kp H         &kp COMMA    &mt RALT DOT  &lt MOUSE FSLH  &studio_unlock
-                                 &lt MEDIA ESC  &lt NAV SPACE  &lt MOUSE TAB    &lt SYM RET  &lt NUM BSPC  &lt FUN DEL
+&trans  &kp Z  &kp X  &kp C          &kp D          &kp V            &kp K        &kp H         &kp COMMA    &mt RALT DOT  &trans &studio_unlock
+                                 &lt MEDIA ESC  &lt NAV SPACE  &lt NUM TAB    &lt SYM RET  &lt NUM BSPC  &lt FUN DEL
             >;
         };
 
@@ -72,15 +72,15 @@
             >;
         };
 
-        mouse_layer {
-            display-name = "Mouse";
-            bindings = <
-&kp TAB    &bootloader  &trans    &trans     &trans     &trans    &trans     &trans          &trans          &trans        &trans           &kp BSPC
-&kp LCTRL  &kp LGUI     &kp LALT  &kp LCTRL  &kp LSHFT  &trans    &trans     &mmv MOVE_LEFT  &mmv MOVE_DOWN  &mmv MOVE_UP  &mmv MOVE_RIGHT  &trans
-&kp LSHFT  &trans       &kp RALT  &to SYM    &to MOUSE  &trans    &trans     &msc SCRL_LEFT  &msc SCRL_DOWN  &msc SCRL_UP  &msc SCRL_RIGHT  &kp ESC
-                                  &trans     &trans     &trans    &mkp RCLK  &mkp LCLK       &mkp MCLK
-            >;
-        };
+//        mouse_layer {
+//            display-name = "Mouse";
+//            bindings = <
+// &kp TAB    &bootloader  &trans    &trans     &trans     &trans    &trans     &trans          &trans          &trans        &trans           &kp BSPC
+// &kp LCTRL  &kp LGUI     &kp LALT  &kp LCTRL  &kp LSHFT  &trans    &trans     &mmv MOVE_LEFT  &mmv MOVE_DOWN  &mmv MOVE_UP  &mmv MOVE_RIGHT  &trans
+// &kp LSHFT  &trans       &kp RALT  &to SYM    &to MOUSE  &trans    &trans     &msc SCRL_LEFT  &msc SCRL_DOWN  &msc SCRL_UP  &msc SCRL_RIGHT  &kp ESC
+//                                  &trans     &trans     &trans    &mkp RCLK  &mkp LCLK       &mkp MCLK
+//            >;
+//        };
 
         media_layer {
             display-name = "Media";
@@ -107,7 +107,7 @@
             bindings = <
 &trans  &kp LBRC   &kp AMPS  &kp ASTRK  &kp LPAR   &kp RBRC     &trans  &to BASE   &trans     &td_gaming  &bootloader  &trans
 &trans  &kp COLON  &kp DLLR  &kp PRCNT  &kp CARET  &kp PLUS     &trans  &kp LSHFT  &kp LCTRL  &kp LALT    &kp LGUI     &trans
-&trans  &kp TILDE  &kp EXCL  &kp AT     &kp HASH   &kp PIPE     &trans  &to SYM    &to MOUSE  &kp RALT    &trans       &trans
+&trans  &kp TILDE  &kp EXCL  &kp AT     &kp HASH   &kp PIPE     &trans  &to SYM    &trans  &kp RALT    &trans       &trans
                              &kp LPAR   &kp RPAR   &kp UNDER    &trans  &trans     &trans
             >;
         };
@@ -134,7 +134,7 @@
             bindings = <
 &kp TAB    &kp Q   &kp W   &kp E    &kp N1     &trans     &to BASE   &kp U     &kp I      &kp O     &kp P    &kp BSPC
 &kp LSHFT  &kp A   &kp S   &kp D    &kp N2     &trans     &mo FUN    &mo NUM   &mo SYM    &kp L     &kp M    &trans
-&kp LCTRL  &kp N6  &kp N5  &kp N4   &kp N3     &trans     &mo MOUSE  &mo NAV   &mo MEDIA  &kp FSLH  &kp SQT  &kp ESC
+&kp LCTRL  &kp N6  &kp N5  &kp N4   &kp N3     &trans     &trans  &mo NAV   &mo MEDIA  &kp FSLH  &kp SQT  &kp ESC
                            &kp ESC  &kp SPACE  &kp TAB    &kp RET    &kp BSPC  &kp DEL
             >;
         };
