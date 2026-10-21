@@ -3,6 +3,17 @@
 Keyboard layout inspired by the miryoku layout, added support for french and a gaming layer.
 
 
+### Building locally
+
+With Docker Desktop running: `.\build-local.ps1` (or `.\build-local.ps1 left` for one half).
+Firmware lands in `..\firmware\`. GitHub Actions still builds on every push.
+
+### Battery monitor (Windows)
+
+`tools/battery_tray.pyw` shows both halves' battery levels in the system tray
+(`pip install bleak pystray pillow`, then run it with `pythonw`). The left half forwards
+the right half's level thanks to `config/corne_left.conf`.
+
 ### Credits
 This keyboard layout is based on or uses the [Miryoku](https://github.com/manna-harbour/miryoku) 
 layout designed by [Manna Harbour](https://github.com/manna-harbour), licensed under GPL-2.0.
