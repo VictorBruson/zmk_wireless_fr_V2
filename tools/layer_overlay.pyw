@@ -81,9 +81,27 @@ def key_label(code):
 
 def parse_keymap(path):
     """Return (layer_defines {NAME: index}, layers [ {name, keys:[(kind, tap, hold)]} ])."""
-    text = path.read_text(encoding="utf-8")
+    # locale.h holds the K_* character keys; read it like the #include in the keymap does.
+    locale = path.with_name("locale.h")
+    text = (locale.read_text(encoding="utf-8") if locale.exists() else "") + "\n" + path.read_text(encoding="utf-8")
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     text = re.sub(r"//[^\n]*", "", text)
+    # Use the US variant of #if defined(LAYOUT_CA_FR) blocks: both firmware variants type the
+    # same characters, and the US variant names them with plain keycodes.
+    lines, stack = [], []
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("#if"):
+            variant = "LAYOUT_CA_FR" in s
+            stack.append([not variant, variant])  # [active, is the variant switch]
+        elif s.startswith("#else") and stack:
+            if stack[-1][1]:
+                stack[-1][0] = not stack[-1][0]
+        elif s.startswith("#endif") and stack:
+            stack.pop()
+        elif all(active for active, _ in stack):
+            lines.append(line)
+    text = "\n".join(lines)
     text = text.replace("\\\n", " ")  # join #define continuation lines
     defines = {m[1]: int(m[2]) for m in re.finditer(r"^#define\s+(\w+)\s+(\d+)\s*$", text, flags=re.M)}
     # Object-like macros holding bindings, e.g. #define NAV_KEYS &trans &kp A ...
@@ -92,7 +110,12 @@ def parse_keymap(path):
     keymap = text[text.index("compatible = \"zmk,keymap\""):]
     layers = []
     for m in re.finditer(r"display-name\s*=\s*\"([^\"]+)\";\s*bindings\s*=\s*<(.*?)>;", keymap, flags=re.S):
-        raw = re.sub(r"\b[A-Z_][A-Z0-9_]*\b", lambda w: binding_macros.get(w[0], w[0]), m[2])
+        raw = m[2]
+        for _ in range(5):  # macros can contain macros (NUM_KEYS -> K_N7 -> &kp N7)
+            new = re.sub(r"\b[A-Z_][A-Z0-9_]*\b", lambda w: binding_macros.get(w[0], w[0]), raw)
+            if new == raw:
+                break
+            raw = new
         names_by_index[len(layers)] = m[1]
         layers.append({"name": m[1], "raw": raw})
 
@@ -191,8 +214,19 @@ class KeyChars:
         self.u32.MapVirtualKeyExW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p]
         self.u32.ToUnicodeEx.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_char_p, wintypes.LPWSTR,
                                          ctypes.c_int, wintypes.UINT, ctypes.c_void_p]
+        self.u32.LoadKeyboardLayoutW.restype = ctypes.c_void_p
+        self.us = self.u32.LoadKeyboardLayoutW("00000409", 0x80)  # already installed; not activated
         self.hkl = self.current_layout()
         self.cache = {}
+
+    def cafr(self):
+        """Windows is on Canadian French: assume the Canadian French firmware is flashed."""
+        return ((self.hkl or 0) >> 16) & 0xFFFF == 0x1009
+
+    def label_layout(self):
+        # The Canadian French firmware types the same characters as the US one on the US layout,
+        # so its labels come from the US table.
+        return self.us if self.cafr() else self.hkl
 
     def current_layout(self):
         hwnd = self.u32.GetForegroundWindow()
@@ -210,11 +244,14 @@ class KeyChars:
     def layout_name(self):
         # High word of the layout handle = the keyboard layout (low word = language).
         layout = ((self.hkl or 0) >> 16) & 0xFFFF
-        return {0x0409: "US", 0x1009: "Canadian French", 0x040C: "French AZERTY",
-                0x0C0C: "Canadian French (legacy)"}.get(layout, f"layout {layout:04X}")
+        return {0x0409: "US", 0x1009: "Canadian French (needs the Canadian French firmware)",
+                0x040C: "French AZERTY (no matching firmware)",
+                0x0C0C: "Canadian French legacy (no matching firmware)"}.get(layout, f"layout {layout:04X}")
 
     def has_altgr(self):
         """US-style layouts have no AltGr characters; there Right Alt is plain Alt."""
+        if self.cafr():
+            return False  # AltGr symbols are already on Sym; labels follow the US table here
         key = ("altgr?", self.hkl)
         if key not in self.cache:
             self.cache[key] = any(self.char(k, False, True) for k in CHAR_KEYS if k in _SC)
@@ -223,9 +260,10 @@ class KeyChars:
     def char(self, code, shift, altgr):
         scan, implicit_shift = CHAR_KEYS[code]
         shift = shift or implicit_shift
-        key = (self.hkl, scan, shift, altgr)
+        hkl = self.label_layout()
+        key = (hkl, scan, shift, altgr)
         if key not in self.cache:
-            vk = self.u32.MapVirtualKeyExW(scan, 1, self.hkl)  # MAPVK_VSC_TO_VK
+            vk = self.u32.MapVirtualKeyExW(scan, 1, hkl)  # MAPVK_VSC_TO_VK
             state = (ctypes.c_ubyte * 256)()
             if shift:
                 state[0x10] = state[0xA0] = 0x80
@@ -233,7 +271,7 @@ class KeyChars:
                 state[0x11] = state[0xA2] = state[0x12] = state[0xA5] = 0x80
             buf = ctypes.create_unicode_buffer(8)
             # flag 0x4: don't touch the keyboard state, so dead keys in other apps keep working
-            n = self.u32.ToUnicodeEx(vk, scan, ctypes.cast(state, ctypes.c_char_p), buf, 8, 0x4, self.hkl)
+            n = self.u32.ToUnicodeEx(vk, scan, ctypes.cast(state, ctypes.c_char_p), buf, 8, 0x4, hkl)
             text = buf.value[:abs(n)] if n else ""
             self.cache[key] = text if text.isprintable() else ""
         return self.cache[key]
