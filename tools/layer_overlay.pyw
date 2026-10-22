@@ -34,8 +34,22 @@ HELD_SIGNALS = {VK_F13 + 0: "NAV", VK_F13 + 1: "MEDIA", VK_F13 + 2: "NUM", VK_F1
                 VK_F13 + 4: "FUN", VK_F13 + 5: "MOUSE"}
 LOCK_SIGNALS = {VK_F13 + 6: "BASE", VK_F13 + 7: "GAMING"}
 LOCK_PREFIX = VK_F13 + 8
-SPARE_SIGNALS = {VK_F13 + 9, VK_F13 + 10, VK_F13 + 11}  # F22-F24, swallowed too
-ALL_SIGNALS = set(HELD_SIGNALS) | set(LOCK_SIGNALS) | {LOCK_PREFIX} | SPARE_SIGNALS
+# Dead keys: F22-F24 = the accent layer is active for the next key only.
+STICKY_SIGNALS = {VK_F13 + 9: "ACC_GRAVE", VK_F13 + 10: "ACC_CIRC", VK_F13 + 11: "ACC_TREMA"}
+STICKY_SECONDS = 5.0  # matches release-after-ms in corne.keymap
+ALL_SIGNALS = set(HELD_SIGNALS) | set(LOCK_SIGNALS) | {LOCK_PREFIX} | set(STICKY_SIGNALS)
+# Keys that don't use up a dead key (ZMK's ignore-modifiers): Shift, Ctrl, Alt, Win, Caps Lock.
+MODIFIER_VKS = {0x10, 0x11, 0x12, 0x14, 0x5B, 0x5C} | set(range(0xA0, 0xA6))
+
+# French characters typed by the keymap's fr_* macros (Alt codes): (normal, with Shift)
+FR_LABELS = {
+    "fr_e_acute": ("é", "É"), "fr_c_cedil": ("ç", "Ç"), "fr_guill": ("«", "»"), "fr_oe": ("œ", "Œ"),
+    "fr_a_grave": ("à", "À"), "fr_e_grave": ("è", "È"), "fr_u_grave": ("ù", "Ù"),
+    "fr_a_circ": ("â", "Â"), "fr_e_circ": ("ê", "Ê"), "fr_i_circ": ("î", "Î"), "fr_o_circ": ("ô", "Ô"),
+    "fr_u_circ": ("û", "Û"), "fr_e_trema": ("ë", "Ë"), "fr_i_trema": ("ï", "Ï"), "fr_u_trema": ("ü", "Ü"),
+    "fr_y_trema": ("ÿ", "Ÿ"), "fr_trema": ("¨", "¨"),
+    "dead_grave": ("`", "`"), "dead_circ_trema": ("^", "¨"),
+}
 
 # ---------------------------------------------------------------- keymap parsing
 
@@ -44,6 +58,7 @@ KEY_LABELS = {
     "BSLH": "\\", "MINUS": "-", "LBKT": "[", "RBKT": "]", "LBRC": "{", "RBRC": "}", "AMPS": "&",
     "ASTRK": "*", "LPAR": "(", "RPAR": ")", "COLON": ":", "DLLR": "$", "PRCNT": "%", "CARET": "^",
     "PLUS": "+", "TILDE": "~", "EXCL": "!", "AT": "@", "HASH": "#", "PIPE": "|", "UNDER": "_",
+    "LT": "<", "GT": ">", "DQT": "\"", "QMARK": "?",
     "SPACE": "Space", "RET": "Enter", "BSPC": "Bksp", "DEL": "Del", "ESC": "Esc", "TAB": "Tab",
     "LEFT": "←", "RIGHT": "→", "UP": "↑", "DOWN": "↓", "PG_UP": "PgUp", "PG_DN": "PgDn",
     "HOME": "Home", "END": "End", "INS": "Insert", "PSCRN": "PrtSc", "SLCK": "ScrLk",
@@ -92,7 +107,11 @@ def parse_keymap(path):
             name, *params = part.split()
             # 4th field: the ZMK keycode that types a character (used for layout/Shift labels)
             code = params[0] if name == "kp" else params[1] if name in ("mt", "lt") or name.startswith("lt_") else None
-            keys.append(convert(name, params, layer_name) + (code if code in CHAR_KEYS else None,))
+            if name in FR_LABELS:
+                code = ("fr",) + FR_LABELS[name]  # fixed characters, Shift picks the capital
+            elif code not in CHAR_KEYS:
+                code = None
+            keys.append(convert(name, params, layer_name) + (code,))
         layer["keys"] = keys
     return defines, layers
 
@@ -133,6 +152,10 @@ def convert(name, p, layer_name):
         return ("n", ("Move " if name == "mmv" else "Scroll ") + arrow, None)
     if name == "mkp":
         return ("a", {"LCLK": "Left click", "RCLK": "Right click", "MCLK": "Middle click"}.get(p[0], p[0]), None)
+    if name.startswith("dead_"):
+        return ("s", FR_LABELS.get(name, ("?",))[0], "accent")
+    if name in FR_LABELS:
+        return ("a", FR_LABELS[name][0], None)
     if name == "bt":
         if p[0] == "BT_SEL":
             return ("f", "BT " + p[1], None)
@@ -224,6 +247,17 @@ class LayerState:
     def __init__(self, defines):
         self.defines = defines
         self.active = set()
+        self.sticky = None        # one-shot accent layer index
+        self.sticky_until = 0.0
+
+    def set_sticky(self, name):
+        self.sticky = self.defines.get(name)
+        self.sticky_until = time.monotonic() + STICKY_SECONDS
+
+    def clear_sticky(self):
+        changed = self.sticky is not None
+        self.sticky = None
+        return changed
 
     def held(self, name, down):
         idx = self.defines.get(name)
@@ -236,7 +270,8 @@ class LayerState:
         self.active = {idx} if idx else set()
 
     def stack(self):
-        return sorted(self.active | {0}, reverse=True)
+        extra = {self.sticky} if self.sticky is not None else set()
+        return sorted(self.active | extra | {0}, reverse=True)
 
 
 # ---------------------------------------------------------------- Windows hook + hotkey
@@ -273,7 +308,10 @@ def input_thread(events):
             vk = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents.vkCode
             if vk in MOD_KEYS:  # Shift / AltGr: watch, never swallow
                 events.put(("mod", (vk, w_param in KEYDOWN)))
-            elif vk in ALL_SIGNALS:
+            elif vk not in ALL_SIGNALS:
+                if w_param in KEYDOWN and vk not in MODIFIER_VKS:
+                    events.put(("key", vk))  # any other key ends a dead-key accent layer
+            else:
                 if w_param in KEYDOWN:
                     events.put(("down", vk))
                 elif w_param in KEYUP:
@@ -418,9 +456,15 @@ class Overlay:
                     else:
                         (self.shift_keys.add if down else self.shift_keys.discard)(mod_vk)
                     changed |= before != (bool(self.shift_keys), self.altgr)
+                elif kind == "key":
+                    changed |= self.state.clear_sticky()
                 elif kind == "error":
                     self.error = vk
                     changed = True
+                elif vk in STICKY_SIGNALS:
+                    if kind == "down":
+                        self.state.set_sticky(STICKY_SIGNALS[vk])
+                        changed = True
                 elif vk == LOCK_PREFIX:
                     if kind == "down":
                         self.lock_pending = time.monotonic()
@@ -441,6 +485,8 @@ class Overlay:
         self.ticks += 1
         if self.ticks % 20 == 0 and self.chars.refresh():  # layout switched (e.g. US <-> FR-CA)
             changed = True
+        if self.state.sticky is not None and time.monotonic() > self.state.sticky_until:
+            changed |= self.state.clear_sticky()  # dead key timed out
         if changed and self.visible:
             self.draw()
         self.root.after(15, self.poll)
@@ -473,7 +519,9 @@ class Overlay:
         held_layers = {self.layers[i]["name"] for i in self.state.active if i < len(self.layers)}
         for pos in range(len(base)):
             (kind, tap, hold, code), dim = self.resolve(pos, stack)
-            if code:
+            if isinstance(code, tuple):  # French character / dead key: fixed, Shift = capital
+                tap = code[2] if shift else code[1]
+            elif code:
                 ch = self.chars.char(code, shift, altgr)
                 # Letters: lowercase normally, capitals with Shift, so Shift is visible at a glance.
                 tap = ch or ("" if altgr else tap)  # AltGr with nothing on that key: blank
