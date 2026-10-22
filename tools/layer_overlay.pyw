@@ -90,7 +90,9 @@ def parse_keymap(path):
         keys = []
         for part in layer.pop("raw").split("&")[1:]:
             name, *params = part.split()
-            keys.append(convert(name, params, layer_name))
+            # 4th field: the ZMK keycode that types a character (used for layout/Shift labels)
+            code = params[0] if name == "kp" else params[1] if name in ("mt", "lt") or name.startswith("lt_") else None
+            keys.append(convert(name, params, layer_name) + (code if code in CHAR_KEYS else None,))
         layer["keys"] = keys
     return defines, layers
 
@@ -138,6 +140,82 @@ def convert(name, p, layer_name):
     return ("s", name, None)
 
 
+# ---------------------------------------------------------------- characters per Windows layout
+# ZMK keycode -> (PC scancode, needs Shift). Windows turns the scancode into a character
+# using the active keyboard layout, so labels follow US / Canadian French / etc.
+_SC = {**{c: s for c, s in zip("QWERTYUIOP", range(0x10, 0x1A))},
+       **{c: s for c, s in zip("ASDFGHJKL", range(0x1E, 0x27))},
+       **{c: s for c, s in zip("ZXCVBNM", range(0x2C, 0x33))},
+       **{f"N{d}": s for d, s in zip("1234567890", range(0x02, 0x0C))},
+       "MINUS": 0x0C, "EQUAL": 0x0D, "LBKT": 0x1A, "RBKT": 0x1B, "BSLH": 0x2B, "SEMI": 0x27,
+       "SQT": 0x28, "GRAVE": 0x29, "COMMA": 0x33, "DOT": 0x34, "FSLH": 0x35}
+_SHIFTED = {"EXCL": "N1", "AT": "N2", "HASH": "N3", "DLLR": "N4", "PRCNT": "N5", "CARET": "N6",
+            "AMPS": "N7", "ASTRK": "N8", "LPAR": "N9", "RPAR": "N0", "UNDER": "MINUS", "PLUS": "EQUAL",
+            "LBRC": "LBKT", "RBRC": "RBKT", "PIPE": "BSLH", "COLON": "SEMI", "TILDE": "GRAVE",
+            "DQT": "SQT", "LT": "COMMA", "GT": "DOT", "QMARK": "FSLH"}
+CHAR_KEYS = {**{k: (s, False) for k, s in _SC.items()}, **{k: (_SC[b], True) for k, b in _SHIFTED.items()}}
+
+
+class KeyChars:
+    """Ask Windows which character a key gives in the foreground window's layout."""
+
+    def __init__(self):
+        self.u32 = ctypes.WinDLL("user32")
+        self.u32.GetKeyboardLayout.restype = ctypes.c_void_p
+        self.u32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
+        self.u32.GetForegroundWindow.restype = wintypes.HWND
+        self.u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+        self.u32.MapVirtualKeyExW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p]
+        self.u32.ToUnicodeEx.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_char_p, wintypes.LPWSTR,
+                                         ctypes.c_int, wintypes.UINT, ctypes.c_void_p]
+        self.hkl = self.current_layout()
+        self.cache = {}
+
+    def current_layout(self):
+        hwnd = self.u32.GetForegroundWindow()
+        tid = self.u32.GetWindowThreadProcessId(hwnd, None) if hwnd else 0
+        return self.u32.GetKeyboardLayout(tid) or self.u32.GetKeyboardLayout(0)
+
+    def refresh(self):
+        """Return True if the layout changed."""
+        hkl = self.current_layout()
+        if hkl and hkl != self.hkl:
+            self.hkl = hkl
+            return True
+        return False
+
+    def layout_name(self):
+        # High word of the layout handle = the keyboard layout (low word = language).
+        layout = ((self.hkl or 0) >> 16) & 0xFFFF
+        return {0x0409: "US", 0x1009: "Canadian French", 0x040C: "French AZERTY",
+                0x0C0C: "Canadian French (legacy)"}.get(layout, f"layout {layout:04X}")
+
+    def has_altgr(self):
+        """US-style layouts have no AltGr characters; there Right Alt is plain Alt."""
+        key = ("altgr?", self.hkl)
+        if key not in self.cache:
+            self.cache[key] = any(self.char(k, False, True) for k in CHAR_KEYS if k in _SC)
+        return self.cache[key]
+
+    def char(self, code, shift, altgr):
+        scan, implicit_shift = CHAR_KEYS[code]
+        shift = shift or implicit_shift
+        key = (self.hkl, scan, shift, altgr)
+        if key not in self.cache:
+            vk = self.u32.MapVirtualKeyExW(scan, 1, self.hkl)  # MAPVK_VSC_TO_VK
+            state = (ctypes.c_ubyte * 256)()
+            if shift:
+                state[0x10] = state[0xA0] = 0x80
+            if altgr:
+                state[0x11] = state[0xA2] = state[0x12] = state[0xA5] = 0x80
+            buf = ctypes.create_unicode_buffer(8)
+            # flag 0x4: don't touch the keyboard state, so dead keys in other apps keep working
+            n = self.u32.ToUnicodeEx(vk, scan, ctypes.cast(state, ctypes.c_char_p), buf, 8, 0x4, self.hkl)
+            text = buf.value[:abs(n)] if n else ""
+            self.cache[key] = text if text.isprintable() else ""
+        return self.cache[key]
+
+
 # ---------------------------------------------------------------- layer state (mirrors ZMK)
 
 class LayerState:
@@ -183,6 +261,8 @@ user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wi
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
 WH_KEYBOARD_LL, WM_HOTKEY = 13, 0x0312
+VK_LSHIFT, VK_RSHIFT, VK_RMENU = 0xA0, 0xA1, 0xA5
+MOD_KEYS = {VK_LSHIFT, VK_RSHIFT, VK_RMENU}
 KEYDOWN = {0x0100, 0x0104}
 KEYUP = {0x0101, 0x0105}
 
@@ -191,7 +271,9 @@ def input_thread(events):
     def proc(n_code, w_param, l_param):
         if n_code == 0:
             vk = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents.vkCode
-            if vk in ALL_SIGNALS:
+            if vk in MOD_KEYS:  # Shift / AltGr: watch, never swallow
+                events.put(("mod", (vk, w_param in KEYDOWN)))
+            elif vk in ALL_SIGNALS:
                 if w_param in KEYDOWN:
                     events.put(("down", vk))
                 elif w_param in KEYUP:
@@ -248,6 +330,10 @@ class Overlay:
         self.events = queue.Queue()
         self.error = None
         self.lock_pending = None
+        self.shift_keys = set()
+        self.altgr = False
+        self.ticks = 0
+        self.chars = KeyChars()
 
         self.root = tk.Tk()
         self.root.title("Corne layers")
@@ -324,6 +410,14 @@ class Overlay:
                 kind, vk = self.events.get_nowait()
                 if kind == "toggle":
                     self.toggle()
+                elif kind == "mod":
+                    mod_vk, down = vk
+                    before = (bool(self.shift_keys), self.altgr)
+                    if mod_vk == VK_RMENU:
+                        self.altgr = down
+                    else:
+                        (self.shift_keys.add if down else self.shift_keys.discard)(mod_vk)
+                    changed |= before != (bool(self.shift_keys), self.altgr)
                 elif kind == "error":
                     self.error = vk
                     changed = True
@@ -344,6 +438,9 @@ class Overlay:
                     changed = True
         except queue.Empty:
             pass
+        self.ticks += 1
+        if self.ticks % 20 == 0 and self.chars.refresh():  # layout switched (e.g. US <-> FR-CA)
+            changed = True
         if changed and self.visible:
             self.draw()
         self.root.after(15, self.poll)
@@ -355,7 +452,7 @@ class Overlay:
                 key = self.layers[idx]["keys"][pos]
                 if key[0] != "t":
                     return key, i > 0
-        return ("x", "", None), False
+        return ("x", "", None, None), False
 
     def draw(self):
         c = self.canvas
@@ -365,12 +462,23 @@ class Overlay:
         title = top if len(stack) <= 2 else f"{top}  (over {', '.join(self.layers[i]['name'] for i in stack[1:-1])})"
         c.create_text(12, HEADER // 2 + 2, text=title, anchor="w", fill=COLORS["ink"],
                       font=("Segoe UI Semibold", 12))
-        c.create_text(int(13.7 * UNIT) + 4, HEADER // 2 + 2, anchor="e", fill=COLORS["muted"],
-                      font=("Segoe UI", 8), text=self.error or "Ctrl+Alt+K hide · right-click menu")
+        shift, altgr = bool(self.shift_keys), self.altgr and self.chars.has_altgr()
+        mods = " + ".join(m for m, on in (("⇧ Shift", shift), ("AltGr", altgr)) if on)
+        right = self.error or (f"{self.chars.layout_name()} · {mods}" if mods
+                               else f"{self.chars.layout_name()} · Ctrl+Alt+K hide · right-click menu")
+        c.create_text(int(13.7 * UNIT) + 4, HEADER // 2 + 2, anchor="e",
+                      fill=COLORS["s"] if mods else COLORS["muted"],
+                      font=("Segoe UI", 9 if mods else 8, "bold" if mods else "normal"), text=right)
         base = self.layers[0]["keys"]
         held_layers = {self.layers[i]["name"] for i in self.state.active if i < len(self.layers)}
         for pos in range(len(base)):
-            (kind, tap, hold), dim = self.resolve(pos, stack)
+            (kind, tap, hold, code), dim = self.resolve(pos, stack)
+            if code:
+                ch = self.chars.char(code, shift, altgr)
+                # Letters: lowercase normally, capitals with Shift, so Shift is visible at a glance.
+                tap = ch or ("" if altgr else tap)  # AltGr with nothing on that key: blank
+                if not shift and len(tap) == 1 and tap.isalpha():
+                    tap = tap.lower()
             x, y = place(pos)
             x0, y0 = 8 + x * UNIT, HEADER + 4 + y * UNIT
             x1, y1 = x0 + UNIT * 0.93, y0 + UNIT * 0.93
